@@ -1,81 +1,116 @@
-# Wreath Scroll Scene — Setup Guide
+# duvro
 
-Everything in this bundle is ready to drop into a Next.js or React project.
+An iOS app that turns a camera roll into a ready-to-post Instagram carousel: it picks the photos, applies a coherent aesthetic, orders the post, and writes the caption.
 
-## What's inside
+Built solo. This repo is a writeup, not the source. The app and server live in private repos.
+
+---
+
+## The problem
+
+Posting a photo dump takes about twenty minutes: scrolling a few hundred photos, picking seven, editing each one so they look like a set, ordering them, writing a caption. Most of that time is spent on decisions people don't enjoy making.
+
+duvro compresses it to about ninety seconds without asking the user to give up control of what gets posted.
+
+---
+
+## Architecture: a two-stage funnel
+
+The first design ran everything on-device. It didn't work, for a reason that turned out to be structural.
+
+Apple's Vision framework can tell you a photo is sharp, well-exposed, and contains three faces. It cannot tell you the photo is a cooking class at a kitchen store, or that the person in it looks good, or that two photos are the same moment. Those judgments are what actually decide whether something is worth posting.
+
+So the pipeline splits by what each stage is good at:
+
+**Stage 1, on-device (Vision, ~2.5s per 100 photos, free)**
+Reject junk. Classify into people / place / food / detail. Cluster near-duplicates. Shortlist roughly 30 candidates.
+
+**Stage 2, one API call (Claude Sonnet, ~50s)**
+Receive 30 thumbnails plus eight metrics each. Select the post, order it, identify runner-ups, write ranked captions.
+
+Stage 1 nominates. Stage 2 selects. The split keeps the expensive call to one request per session (~$0.02) instead of sending 200 photos, and it puts the judgment where judgment exists.
+
+**What that looks like in practice.** In one test, Vision reported a photo as `people, 3 faces, cluster 4`. The model read the same thumbnail as "cooking class at Sur La Table, three people in aprons actively working," selected it as the social pivot in a five-photo post, and captioned the set "ate well, cooked better." It also rejected all three photos I had deliberately planted as bad, and correctly offered the near-duplicate as a swap rather than including both.
+
+---
+
+## A feature I deleted
+
+The original thesis was that duvro should recognize who appears most often in your camera roll and center the post on them.
+
+I built it, then measured whether it worked. Vision produces "feature prints," vectors you can compare for similarity. Comparing face crops across photos: same-person and different-person distances overlapped almost completely. No threshold separated them.
+
+The reason is that general image feature prints encode lighting, framing, and composition, not identity. Two photos of the same person in different rooms look further apart than two different people photographed the same way.
+
+Three options existed. Use Photos' People albums (private API, no public access). Ship a Core ML face-embedding model (licensing questions around scraped face datasets, plus biometric privacy statutes like BIPA). Or drop it.
+
+I dropped it, and moved the inference to Stage 2: the model infers the recurring subject visually from the thumbnails. The deleted code is gone, not commented out, with the reasoning recorded so it doesn't get rebuilt.
+
+There was also a product problem hiding in the technical one. The largest face cluster in almost any camera roll is the owner's own selfies. A feature built to center posts on the recurring person would have centered every post on selfies.
+
+---
+
+## Three bugs worth writing down
+
+**Memory: 733MB peak against a 400MB ceiling.**
+
+Exporting seven full-resolution photos through a filter chain was using nearly twice the memory iOS allows before it kills the app. The per-photo instrumentation showed the shape of it: photos 1 through 3 cost about 15MB each, photos 4 through 6 cost 100 to 123MB each and never came back down.
+
+The expensive ones were all 24 megapixels. But the diagnostic line that mattered was this:
 
 ```
-bundle/
-├── WreathScrollScene.jsx    The React component
-├── frames/
-│   ├── desktop/             96 WebP frames @ 1920x1080 (~6.5MB total)
-│   └── mobile/              96 WebP frames @ 1280x720  (~3.4MB total)
-└── README.md                This file
+photo 4 clearRenderCaches: 291.2MB -> 291.2MB (Δ+0.0MB)
 ```
 
-## Installation
+The function whose entire job is freeing memory was freeing nothing, every time. `autoreleasepool` releases objects; it does not touch a shared `CIContext`'s internal render memory, and `clearCaches()` provably wasn't reaching whatever was being retained.
 
-### 1. Install GSAP
+Two fixes: cap render resolution at 2048px on the long edge (Instagram serves carousels at roughly 1080x1350, so nothing visible is lost), and use a fresh `CIContext` per export render that gets deallocated afterward. The cap alone would have hidden the problem rather than solved it, since current iPhones shoot 48MP.
 
-```bash
-npm install gsap
-```
+Result: **733MB to 151MB**, with per-photo cost flat regardless of source resolution.
 
-### 2. Copy the frames into your public directory
+**A parameter that did nothing.**
 
-Place the `frames/` folder in `public/frames/` so the paths resolve as:
-- `public/frames/desktop/frame_0001.webp` ... `frame_0096.webp`
-- `public/frames/mobile/frame_0001.webp`  ... `frame_0096.webp`
+Every film-grain value in every aesthetic pack was meaningless. The `intensity` parameter adjusted the noise texture's internal contrast, but the composite onto the image had no opacity control, so it always ran at full strength. Setting grain to 12 or 120 produced nearly identical output.
 
-### 3. Drop the component into your project
+This was invisible until someone looked at a rendered photo and said "the grain is too heavy," and the fix turned out to be structural rather than a tuning change.
 
-Put `WreathScrollScene.jsx` in your components directory, then import it into your landing page:
+**A test tool that would have invalidated an evaluation.**
 
-```jsx
-import WreathScrollScene from "@/components/WreathScrollScene";
+To test the selection prompt against real photos, I wrote a script that downsamples images with macOS `sips` and posts them to the endpoint.
 
-export default function HomePage() {
-  return (
-    <>
-      <WreathScrollScene />
+`sips -Z` strips the EXIF orientation tag without rotating the pixels.
 
-      {/* Your next section — starts with black background to match
-          the final frame seamlessly */}
-      <section style={{ background: "#000", color: "#f5f0e6" }}>
-        {/* Demo, features, product copy... */}
-      </section>
-    </>
-  );
-}
-```
+Every portrait iPhone photo would have reached the model sideways. The selections would have been bad, and I would have blamed the prompt. Caught by building a fixture with a known orientation tag and checking the output rather than trusting the resize.
 
-## Tuning
+---
 
-Three values in the component control how the scene feels:
+## Constraints that shaped the product
 
-**`height: "300vh"`** on the container — how much scrolling completes the animation. 250vh feels snappy, 400vh feels cinematic. Start at 300vh.
+**Add-only photo permission.** duvro requests the narrowest photo permission iOS offers: it can add finished photos to your camera roll, and cannot read, browse, or delete your library.
 
-**`scrub: 0.5`** on ScrollTrigger — how much the frame update lags behind the scroll. 0.3 feels responsive, 1.0 feels dreamlike. 0.5 is the usual sweet spot.
+That decision cost a feature. Saving into a named "duvro" album requires `PHAssetCollectionChangeRequest`, which crashes under add-only authorization, and finding an existing album requires read access that add-only doesn't grant. Verified by isolation test: removing album creation entirely made export work.
 
-**`window.innerWidth < 768`** — the mobile breakpoint. Raise to 1024 if you want tablets to use the lighter mobile frames too.
+So v1 saves to the camera roll and the handoff reads "select your 7 most recent photos, tap them in order." Slightly worse UX, and the privacy claim on the welcome screen stays true.
 
-## Performance notes
+**Preview must match export exactly.** The three-way edit screen shows a downsampled render; export re-renders at full resolution. Those go through one shared crop function, deliberately, because forking it is the easy way to ship an app that exports something the user never approved.
 
-- First frame renders immediately on load (before the rest finish preloading), so LCP is fast
-- Canvas with device-pixel-ratio scaling stays crisp on retina displays
-- DPR is capped at 2 to avoid wasteful 3x rendering on ultra-high-DPI phones
-- Total load: ~6.5MB desktop, ~3.4MB mobile — comparable to one large hero image
+This is also why a planned generative-editing tier has to generate at full resolution and downsample for preview, rather than the reverse: generation is non-deterministic, so a second generation at export time would produce a different image.
 
-## Seamless transition into the next section
+---
 
-The final frame is pure black, so the section immediately below the scroll scene should also have a black background. The handoff will be invisible. Once you're in that section, you can introduce your cream-toned UI, product demo, feature sections, etc.
+## Stack
 
-## If something feels off
+Swift / SwiftUI, Vision, Core Image, PhotosUI. Node serverless functions on Vercel, zero dependencies. Anthropic API with prompt caching on the system prompt. DeviceCheck for per-device entitlement without accounts (ES256 JWT signing, no external storage: Apple holds the bits).
 
-**Animation feels too fast:** increase container height to 400vh.
+---
 
-**Scroll feels laggy:** lower scrub to 0.3 or 0.2.
+## Status
 
-**Frames look pixelated:** you may be on a >2x DPR display and hitting the cap. Raise the DPR cap to 3, but watch performance.
+The full flow works end to end: import, curate, edit, review, caption, export, hand off to Instagram. The selection call is live. Nine aesthetic variants exist; three are tuned against reference grades, six are not yet.
 
-**Long blank flash on first load:** preloading is async. Consider adding a simple black overlay that fades out once the first frame loads, using the firstLoaded flag already in the component.
+The next milestone is a blind test: three people hand-pick seven photos from their own camera roll before seeing duvro's picks, and duvro has to overlap on at least four or be rated equal or better. Nothing ships until that passes.
+
+---
+
+<!-- TODO: add screenshots (vibe selection, three-way edit, showcase collage, final review) -->
+<!-- TODO: add a few representative source files -->
