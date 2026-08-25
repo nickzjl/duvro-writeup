@@ -2,9 +2,7 @@
 
 An iOS app that turns a camera roll into a ready-to-post Instagram carousel: it picks the photos, applies a coherent aesthetic, orders the post, and writes the caption.
 
-Built solo. This repo is a writeup, not the source. The app and server live in private repos.
-
-Built by directing Claude Code. The architecture, the diagnoses, and the product decisions here are mine; the implementation was delegated.
+Built solo, by directing Claude Code. The architecture, the diagnoses, and the product decisions here are mine; the implementation was delegated. This repo is a writeup, not the source. The app and server live in private repos.
 
 ---
 
