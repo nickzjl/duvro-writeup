@@ -52,7 +52,7 @@ There was also a product problem hiding in the technical one. The largest face c
 
 ## Three bugs worth writing down
 
-**Memory: 733MB peak against a 400MB ceiling.**
+**Memory: 531MB peak against a 400MB ceiling.**
 
 Exporting seven full-resolution photos through a filter chain was using nearly twice the memory iOS allows before it kills the app. The per-photo instrumentation showed the shape of it: photos 1 through 3 cost about 15MB each, photos 4 through 6 cost 100 to 123MB each and never came back down.
 
